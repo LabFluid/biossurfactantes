@@ -1,17 +1,23 @@
 import numpy as np
 
-def step_ssprk33(L_func, u_n, t_n, dt):
-    
+import numpy as np
+
+
+def step_ssprk33(rhs_func, u, t, dt):
+
     # Estágio 1
-    u_1 = u_n + dt * L_func(t_n, u_n)
+    k1 = rhs_func(t, u)
+    u1 = u + dt * k1
     
     # Estágio 2
-    u_2 = (0.75 * u_n) + (0.25 * u_1) + (0.25 * dt * L_func(t_n + dt, u_1))
-
-    # Estágio 3 
-    u_n_plus_1 = (1.0/3.0 * u_n) + (2.0/3.0 * u_2) + (2.0/3.0 * dt * L_func(t_n + 0.5 * dt, u_2))
+    k2 = rhs_func(t + dt, u1)
+    u2 = 0.75 * u + 0.25 * (u1 + dt * k2)
     
-    return u_n_plus_1
+    # Estágio 3
+    k3 = rhs_func(t + 0.5 * dt, u2)
+    u_new = (1.0/3.0) * u + (2.0/3.0) * (u2 + dt * k3)
+    
+    return u_new
 
 def step_rk4(L_func, u_n, t_n, dt):
 
