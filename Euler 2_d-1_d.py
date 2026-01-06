@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from numba import njit
 
 # Parâmetros
 GAMMA = 1.4
@@ -14,6 +15,7 @@ x = np.linspace(DX/2, LX-DX/2, NX)
 y = np.linspace(DY/2, LY-DY/2, NY)
 X, Y = np.meshgrid(x, y, indexing='ij')
 
+@njit
 def cons_to_prim(U_vec):
     rho = U_vec[0]
     u = U_vec[1] / rho
@@ -25,10 +27,12 @@ def prim_to_cons(rho, u, v, p):
     E = p/(GAMMA-1) + 0.5*rho*(u**2 + v**2)
     return np.array([rho, rho*u, rho*v, E])
 
+@njit
 def flux_x_scalar(rho, u, v, p):
     E = p/(GAMMA-1) + 0.5*rho*(u**2 + v**2)
     return np.array([rho*u, rho*u**2 + p, rho*u*v, u*(E+p)])
 
+@njit
 def flux_y_scalar(rho, u, v, p):
     E = p/(GAMMA-1) + 0.5*rho*(u**2 + v**2)
     return np.array([rho*v, rho*u*v, rho*v**2 + p, v*(E+p)])
@@ -36,14 +40,25 @@ def flux_y_scalar(rho, u, v, p):
 def sound_speed(rho, p):
     return np.sqrt(GAMMA * np.maximum(p, 1e-20) / np.maximum(rho, 1e-20))
 
+@njit
 def minmod(a, b, c):
     result = np.zeros_like(a)
-    pos = (a > 0) & (b > 0) & (c > 0)
-    neg = (a < 0) & (b < 0) & (c < 0)
-    result[pos] = np.minimum(np.minimum(a[pos], b[pos]), c[pos])
-    result[neg] = np.maximum(np.maximum(a[neg], b[neg]), c[neg])
+    for i in range(a.shape[0]):
+        for j in range(a.shape[1]):
+            for k in range(a.shape[2]):
+                if (a[i,j,k] > 0) and (b[i,j,k] > 0) and (c[i,j,k] > 0):
+                    result[i,j,k] = min(a[i,j,k], b[i,j,k], c[i,j,k])
+                elif (a[i,j,k] < 0) and (b[i,j,k] < 0) and (c[i,j,k] < 0):
+                    result[i,j,k] = max(a[i,j,k], b[i,j,k], c[i,j,k])
+                else:
+                    result[i,j,k] = 0.0
+    # pos = (a > 0) & (b > 0) & (c > 0)
+    # neg = (a < 0) & (b < 0) & (c < 0)
+    # result[pos] = np.minimum(np.minimum(a[pos], b[pos]), c[pos])
+    # result[neg] = np.maximum(np.maximum(a[neg], b[neg]), c[neg])
     return result
 
+@njit
 def reconstruct(U, dx, axis):
     theta = 2 
     
@@ -69,6 +84,7 @@ def reconstruct(U, dx, axis):
 
         return U_face_R[:, :, :-1], U_face_L[:, :, 1:]
 
+@njit(parallel=True)
 def knp_flux_x(U):
     U_L_faces, U_R_faces = reconstruct(U, DX, axis=0)
     _, nx_inter, ny = U_L_faces.shape
@@ -95,6 +111,7 @@ def knp_flux_x(U):
 
     return H
 
+@njit(parallel=True)
 def knp_flux_y(U):
     U_L_faces, U_R_faces = reconstruct(U, DY, axis=1)
     _, nx, ny_inter = U_L_faces.shape
