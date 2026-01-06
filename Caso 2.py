@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
-from reservatório import carregar_dados_reservatorio
+#from reservatório import carregar_dados_reservatorio
 
 # Parâmetros
 muw = 1.0e-3   #viscosidade da água
@@ -39,6 +39,10 @@ dy = Ly/ny
 x = np.linspace(dx/2, Lx-dx/2, nx) # centros das células em x
 y = np.linspace(dy/2, Ly-dy/2, ny) # centros das células em y
 X, Y = np.meshgrid(x, y, indexing='ij')
+
+with open("spe10_layer_36.pbt") as f:
+    data = f.readlines()
+    permeability = np.array([float(val) for val in data]).reshape((60, 220)).T  # shape (nx, ny), in Darcy
 
 # Funções
 def Sg(Sw):
