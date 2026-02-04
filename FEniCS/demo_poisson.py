@@ -137,12 +137,26 @@ bc = fem.dirichletbc(value=ScalarType(0), dofs=dofs, V=V)
 # Next, the variational problem is defined:
 
 # +
+<<<<<<< Updated upstream
+=======
+with open("spe10_layer_36.pbt") as f:
+    data = f.readlines()
+    permeability = np.array([float(val) for val in data]).reshape((60, 220)).T  # shape (nx, ny), in Darcy
+
+>>>>>>> Stashed changes
 u = ufl.TrialFunction(V)
 v = ufl.TestFunction(V)
 x = ufl.SpatialCoordinate(msh)
 f = 10 * ufl.exp(-((x[0] - 0.5) ** 2 + (x[1] - 0.5) ** 2) / 0.02)
 g = ufl.sin(5 * x[0])
+<<<<<<< Updated upstream
 a = ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
+=======
+i = int((x[0]*220/3.67))
+j = int((x[1]*60))
+kinv = 1/permeability[i,j]
+a = ufl.inner(kinv * ufl.grad(u), ufl.grad(v)) * ufl.dx
+>>>>>>> Stashed changes
 L = ufl.inner(f, v) * ufl.dx + ufl.inner(g, v) * ufl.ds
 # -
 
