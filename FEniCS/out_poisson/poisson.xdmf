@@ -10,12 +10,30 @@
         <DataItem Dimensions="13481 2" Format="HDF">poisson.h5:/Mesh/mesh/geometry</DataItem>
       </Geometry>
     </Grid>
-    <Grid Name="f" GridType="Collection" CollectionType="Temporal">
-      <Grid Name="f" GridType="Uniform">
+    <Grid Name="Pressao" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="Pressao" GridType="Uniform">
         <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
         <Time Value="0" />
-        <Attribute Name="f" AttributeType="Scalar" Center="Node">
-          <DataItem Dimensions="13481 1" Format="HDF">poisson.h5:/Function/f/0</DataItem>
+        <Attribute Name="Pressao" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="13481 1" Format="HDF">poisson.h5:/Function/Pressao/0</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="Permeabilidade" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="Permeabilidade" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="0" />
+        <Attribute Name="Permeabilidade" AttributeType="Scalar" Center="Cell">
+          <DataItem Dimensions="13200 1" Format="HDF">poisson.h5:/Function/Permeabilidade/0</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="Velocidade" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="Velocidade" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="0" />
+        <Attribute Name="Velocidade" AttributeType="Vector" Center="Cell">
+          <DataItem Dimensions="13200 3" Format="HDF">poisson.h5:/Function/Velocidade/0</DataItem>
         </Attribute>
       </Grid>
     </Grid>

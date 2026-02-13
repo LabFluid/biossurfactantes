@@ -116,41 +116,44 @@ V = fem.functionspace(msh, ("Lagrange", 1))
 # with a 'marker' function that returns `True` for points `x` on the
 # boundary and `False` otherwise.
 
-facets = mesh.locate_entities_boundary(
-    msh,
-    dim=(msh.topology.dim - 1),
-    marker=lambda x: np.isclose(x[0], 0.0) | np.isclose(x[0], 3.67),
-)
+# --- MODIFIED: Boundary conditions for Flow (Left to Right) ---
+facets_left = mesh.locate_entities_boundary(msh, msh.topology.dim-1, lambda x: np.isclose(x[0], 0.0))
+facets_right = mesh.locate_entities_boundary(msh, msh.topology.dim-1, lambda x: np.isclose(x[0], 3.67))
 
-# We now find the degrees-of-freedom that are associated with the
-# boundary facets using {py:func}`locate_dofs_topological
-# <dolfinx.fem.locate_dofs_topological>`:
+dofs_left = fem.locate_dofs_topological(V, msh.topology.dim-1, facets_left)
+dofs_right = fem.locate_dofs_topological(V, msh.topology.dim-1, facets_right)
 
-dofs = fem.locate_dofs_topological(V=V, entity_dim=1, entities=facets)
-
-# and use {py:func}`dirichletbc <dolfinx.fem.dirichletbc>` to create a
-# {py:class}`DirichletBC <dolfinx.fem.DirichletBC>` class that
-# represents the boundary condition:
-
-bc = fem.dirichletbc(value=ScalarType(0), dofs=dofs, V=V)
+# Pressão 1 na esquerda, 0 na direita
+bc_left = fem.dirichletbc(ScalarType(10.0), dofs_left, V)
+bc_right = fem.dirichletbc(ScalarType(0.0), dofs_right, V)
+bcs = [bc_left, bc_right]
 
 # Next, the variational problem is defined:
+# --- MODIFIED: Load Permeability ---
+try:
+    with open("spe10_layer_36.pbt") as f:
+        data = f.readlines()
+    permeability = np.array([float(val) for val in data]).reshape((60, 220)).T 
+except FileNotFoundError:
+    print("Arquivo não encontrado, usando aleatório.")
+    permeability = np.random.rand(220, 60)
 
-# +
-with open("spe10_layer_36.pbt") as f:
-    data = f.readlines()
-    permeability = np.array([float(val) for val in data]).reshape((60, 220)).T  # shape (nx, ny), in Darcy
+# Create DG0 Function for Permeability (K)
+V_K = fem.functionspace(msh, ("DG", 0))
+K = fem.Function(V_K)
+K.name = "Permeabilidade"
+
+dof_coords = V_K.tabulate_dof_coordinates()
+idx_i = np.clip(np.floor(dof_coords[:, 0] / (3.67/220)).astype(int), 0, 219)
+idx_j = np.clip(np.floor(dof_coords[:, 1] / (1.0/60)).astype(int), 0, 59)
+K.x.array[:] = permeability[idx_i, idx_j].flatten()
 
 u = ufl.TrialFunction(V)
 v = ufl.TestFunction(V)
-x = ufl.SpatialCoordinate(msh)
-f = 10 * ufl.exp(-((x[0] - 0.5) ** 2 + (x[1] - 0.5) ** 2) / 0.02)
-g = ufl.sin(5 * x[0])
-i = int((x[0]*220/3.67))
-j = int((x[1]*60))
-kinv = 1/permeability[i,j]
-a = ufl.inner(kinv * ufl.grad(u), ufl.grad(v)) * ufl.dx
-L = ufl.inner(f, v) * ufl.dx + ufl.inner(g, v) * ufl.ds
+
+# Darcy Equation: div(K * grad(u)) = 0
+a = ufl.dot(K * ufl.grad(u), ufl.grad(v)) * ufl.dx
+L = fem.Constant(msh, 0.0) * v * ufl.dx 
 # -
 
 # A {py:class}`LinearProblem <dolfinx.fem.petsc.LinearProblem>` object is
@@ -164,45 +167,39 @@ L = ufl.inner(f, v) * ufl.dx + ufl.inner(g, v) * ufl.ds
 problem = LinearProblem(
     a,
     L,
-    bcs=[bc],
+    bcs=bcs,
     petsc_options_prefix="demo_poisson_",
     petsc_options={"ksp_type": "preonly", "pc_type": "lu", "ksp_error_if_not_converged": True},
 )
 uh = problem.solve()
+uh.name = "Pressao"
 assert isinstance(uh, fem.Function)
 # -
+
+# --- MODIFIED: Calculate Velocity Vectors ---
+W = fem.functionspace(msh, ("DG", 0, (msh.topology.dim,)))
+u_vel = fem.Function(W, name="Velocidade")
+
+points_ref = W.sub(0).element.interpolation_points
+vx_expr = fem.Expression((-K * ufl.grad(uh))[0], points_ref)
+vy_expr = fem.Expression((-K * ufl.grad(uh))[1], points_ref)
+
+u_vel.sub(0).interpolate(vx_expr)
+u_vel.sub(1).interpolate(vy_expr)
+# --------------------------------------------
 
 # The solution can be written to a {py:class}`XDMFFile
 # <dolfinx.io.XDMFFile>` file visualization with [ParaView](https://www.paraview.org/)
 # or [VisIt](https://visit-dav.github.io/visit-website/):
 
 # +
-out_folder = Path("out_poisson")
+# Save locally
+out_folder = Path(__file__).parent.absolute() / "out_poisson"
 out_folder.mkdir(parents=True, exist_ok=True)
+
 with io.XDMFFile(msh.comm, out_folder / "poisson.xdmf", "w") as file:
     file.write_mesh(msh)
-    file.write_function(uh)
-# -
+    file.write_function(uh)  
+    file.write_function(K)     
+    file.write_function(u_vel) 
 
-# and displayed using [pyvista](https://docs.pyvista.org/).
-
-# +
-try:
-    import pyvista
-
-    cells, types, x = plot.vtk_mesh(V)
-    grid = pyvista.UnstructuredGrid(cells, types, x)
-    grid.point_data["u"] = uh.x.array.real
-    grid.set_active_scalars("u")
-    plotter = pyvista.Plotter()
-    plotter.add_mesh(grid, show_edges=True)
-    warped = grid.warp_by_scalar()
-    plotter.add_mesh(warped)
-    if pyvista.OFF_SCREEN:
-        plotter.screenshot(out_folder / "uh_poisson.png")
-    else:
-        plotter.show()
-except ModuleNotFoundError:
-    print("'pyvista' is required to visualise the solution.")
-    print("To install pyvista with pip: 'python3 -m pip install pyvista'.")
-# -
