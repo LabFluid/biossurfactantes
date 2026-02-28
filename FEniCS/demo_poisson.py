@@ -116,27 +116,22 @@ V = fem.functionspace(msh, ("Lagrange", 1))
 # with a 'marker' function that returns `True` for points `x` on the
 # boundary and `False` otherwise.
 
-# --- MODIFIED: Boundary conditions for Flow (Left to Right) ---
 facets_left = mesh.locate_entities_boundary(msh, msh.topology.dim-1, lambda x: np.isclose(x[0], 0.0))
 facets_right = mesh.locate_entities_boundary(msh, msh.topology.dim-1, lambda x: np.isclose(x[0], 3.67))
 
 dofs_left = fem.locate_dofs_topological(V, msh.topology.dim-1, facets_left)
 dofs_right = fem.locate_dofs_topological(V, msh.topology.dim-1, facets_right)
 
-# Pressão 1 na esquerda, 0 na direita
 bc_left = fem.dirichletbc(ScalarType(10.0), dofs_left, V)
 bc_right = fem.dirichletbc(ScalarType(0.0), dofs_right, V)
 bcs = [bc_left, bc_right]
 
 # Next, the variational problem is defined:
-# --- MODIFIED: Load Permeability ---
-try:
-    with open("spe10_layer_36.pbt") as f:
-        data = f.readlines()
-    permeability = np.array([float(val) for val in data]).reshape((60, 220)).T 
-except FileNotFoundError:
-    print("Arquivo não encontrado, usando aleatório.")
-    permeability = np.random.rand(220, 60)
+
+with open("spe10_layer_36.pbt") as f:
+    data = f.readlines()
+permeability = np.array([float(val) for val in data]).reshape((60, 220)).T 
+
 
 # Create DG0 Function for Permeability (K)
 V_K = fem.functionspace(msh, ("DG", 0))
@@ -151,10 +146,8 @@ K.x.array[:] = permeability[idx_i, idx_j].flatten()
 u = ufl.TrialFunction(V)
 v = ufl.TestFunction(V)
 
-# Darcy Equation: div(K * grad(u)) = 0
 a = ufl.dot(K * ufl.grad(u), ufl.grad(v)) * ufl.dx
 L = fem.Constant(msh, 0.0) * v * ufl.dx 
-# -
 
 # A {py:class}`LinearProblem <dolfinx.fem.petsc.LinearProblem>` object is
 # created that brings together the variational problem, the Dirichlet
@@ -163,7 +156,6 @@ L = fem.Constant(msh, 0.0) * v * ufl.dx
 # if the solver does not converge. The {py:func}`solve
 # <dolfinx.fem.petsc.LinearProblem.solve>` computes the solution.
 
-# +
 problem = LinearProblem(
     a,
     L,
@@ -174,32 +166,22 @@ problem = LinearProblem(
 uh = problem.solve()
 uh.name = "Pressao"
 assert isinstance(uh, fem.Function)
-# -
 
-# --- MODIFIED: Calculate Velocity Vectors ---
+
 W = fem.functionspace(msh, ("DG", 0, (msh.topology.dim,)))
 u_vel = fem.Function(W, name="Velocidade")
 
-points_ref = W.sub(0).element.interpolation_points
-vx_expr = fem.Expression((-K * ufl.grad(uh))[0], points_ref)
-vy_expr = fem.Expression((-K * ufl.grad(uh))[1], points_ref)
-
-u_vel.sub(0).interpolate(vx_expr)
-u_vel.sub(1).interpolate(vy_expr)
-# --------------------------------------------
+flux_expr = fem.Expression(-K * ufl.grad(uh), W.element.interpolation_points)
+u_vel.interpolate(flux_expr)
 
 # The solution can be written to a {py:class}`XDMFFile
 # <dolfinx.io.XDMFFile>` file visualization with [ParaView](https://www.paraview.org/)
 # or [VisIt](https://visit-dav.github.io/visit-website/):
 
-# +
-# Save locally
 out_folder = Path(__file__).parent.absolute() / "out_poisson"
 out_folder.mkdir(parents=True, exist_ok=True)
 
-with io.XDMFFile(msh.comm, out_folder / "poisson.xdmf", "w") as file:
-    file.write_mesh(msh)
-    file.write_function(uh)  
-    file.write_function(K)     
-    file.write_function(u_vel) 
+output_file = out_folder / "resultados.bp"
 
+with io.VTXWriter(msh.comm, output_file, [uh, K, u_vel]) as vtx:
+    vtx.write(0.0) 
