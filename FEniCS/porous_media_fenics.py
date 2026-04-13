@@ -58,3 +58,17 @@ out_folder.mkdir(exist_ok=True)
 out_file = out_folder / "porous_media.bp"
 with io.VTXWriter(msh.comm, out_file, [uh, K, u_vel]) as vtx:
     vtx.write(0.0)
+
+ux_export = np.zeros((220, 60))
+uy_export = np.zeros((220, 60))
+
+dof_coords_W = W.tabulate_dof_coordinates()
+
+idx_i_W = np.clip(np.floor(dof_coords_W[:, 0] / (3.67/220)).astype(int), 0, 219)
+idx_j_W = np.clip(np.floor(dof_coords_W[:, 1] / (1.0/60)).astype(int), 0, 59)
+
+ux_export[idx_i_W, idx_j_W] = u_vel.x.array[0::2]
+uy_export[idx_i_W, idx_j_W] = u_vel.x.array[1::2]
+
+np.savez("output/velocidades_spe10.npz", ux=ux_export, uy=uy_export)
+print("Velocidades exportadas com sucesso para 'velocidades_spe10.npz'")
