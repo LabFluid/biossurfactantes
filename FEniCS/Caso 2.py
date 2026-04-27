@@ -2,12 +2,12 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from Darcy_FEM import Lx
-from Darcy_FEM import Ly
-from Darcy_FEM import create_darcy_data
-from Darcy_FEM import nx
-from Darcy_FEM import ny
-from Darcy_FEM import solve_darcy
+from RT_FEM import Lx
+from RT_FEM import Ly
+from RT_FEM import create_darcy_data
+from RT_FEM import nx
+from RT_FEM import ny
+from RT_FEM import solve_darcy
 
 
 # Parametros
@@ -17,7 +17,7 @@ Swc = 0.2
 Sgr = 0.0
 Sstar = 0.37
 nmax = 8.0e13
-Sw_0 = 1.0
+Sw_0 = 0.9
 Sw_inj = 0.372
 nd_0 = 0.0
 nd_inj = 0.0
@@ -142,6 +142,7 @@ def initial_condition():
 
 
 def apply_bc(S):
+   # S[0, :, :] = np.clip(S[0, :, :], Swc, 1.0)
     S[0, 0, :] = Sw_inj
     S[1, 0, :] = Sg(Sw_inj) * nd_inj
     S[1, :, :] = np.maximum(S[1, :, :], 0.0)
@@ -186,7 +187,7 @@ def KNP_flux_x(S, ux, phi):
             hR = flux_x(Sw_R, nD_R, u_face)
             sL = S_L[:, i, j]
             sR = S_R[:, i, j]
-            denom = a_plus - a_minus
+            denom = a_plus - a_minus + eps
             H[:, i, j] = (a_plus * hL - a_minus * hR + a_plus * a_minus * (sR - sL)) / denom
 
     return H
@@ -217,7 +218,7 @@ def KNP_flux_y(S, uy, phi):
             hR = flux_y(Sw_R, nD_R, v_face)
             sL = S_L[:, i, j]
             sR = S_R[:, i, j]
-            denom = a_plus - a_minus
+            denom = a_plus - a_minus + eps
             H[:, i, j] = (a_plus * hL - a_minus * hR + a_plus * a_minus * (sR - sL)) / denom
 
     return H
@@ -314,14 +315,30 @@ def run_simulation():
 
     while t < t_final:
         Sw = S[0]
+
+        Sw_before = S[0].copy()
+
         nD = extract_nD(S)
         pressure, ux, uy = solve_darcy(Sw, nD, darcy_data)
+
+        print(f"ux médio = {np.mean(ux):.6e}")
+        print(f"uy médio = {np.mean(uy):.6e}")
 
         t_macro = t + dt_u
         if t_macro > t_final:
             t_macro = t_final
 
         S, t, local_steps = advance_transport(S, ux, uy, phi, t, t_macro)
+
+        Sw_after = S[0]
+        dSw = Sw_after - Sw_before
+
+        print(f"dSw médio = {np.mean(np.abs(dSw)):.6e}")
+
+        for i in [0, 1, 2, 3, 4, 5, 10, 20]:
+             print(f"col {i:3d} Sw médio = {np.mean(S[0][i, :]):.6f}")
+
+
         macro_steps += 1
         transport_steps += local_steps
 
