@@ -1,21 +1,21 @@
 from pathlib import Path
-from mpi4py import MPI
+
 import numpy as np
 import ufl
 from basix.ufl import element
-from dolfinx import default_real_type, fem, mesh
+from mpi4py import MPI
+from petsc4py.PETSc import ScalarType
+
+from dolfinx import default_real_type, fem, geometry, mesh
 from dolfinx.fem.petsc import LinearProblem
 
 
-# Parametros
 muw = 1.0e-3
 mug = 2.0e-5
 Swc = 0.2
 Sgr = 0.0
 u_inj = 3.0e-5
-pressure_right = 0.0
 
-# Malha
 Lx = 3.67
 Ly = 1.0
 nx = 220
@@ -23,7 +23,6 @@ ny = 60
 dx = Lx / nx
 dy = Ly / ny
 
-# Permeabilidade
 permeability_file = "spe10_layer_36.pbt"
 eps = 1.0e-12
 
@@ -61,29 +60,80 @@ def lambda_total(Sw, nD):
 
 
 def create_rt_element(msh):
-    try:
-        return element("RT", msh.basix_cell(), 1, dtype=default_real_type)
-    except ValueError:
-        return element("RTCF", msh.basix_cell(), 1, dtype=default_real_type)
+    return element("RT", msh.basix_cell(), 1, dtype=default_real_type)
+
 
 
 def create_pressure_element(msh):
-    try:
-        return element("Discontinuous Lagrange", msh.basix_cell(), 0, dtype=default_real_type)
-    except ValueError:
-        return element("DQ", msh.basix_cell(), 0, dtype=default_real_type)
+    return element("DG", msh.basix_cell(), 0, dtype=default_real_type)
 
 
-def create_darcy_data():
-    msh = mesh.create_rectangle(
-        MPI.COMM_WORLD,
-        [[0.0, 0.0], [Lx, Ly]],
-        [nx, ny],
-        cell_type=mesh.CellType.quadrilateral,
-    )
-    tdim = msh.topology.dim
-    fdim = tdim - 1
+def compute_point_cells(msh, points):
+    tree = geometry.bb_tree(msh, msh.topology.dim)
+    candidates = geometry.compute_collisions_points(tree, points)
+    colliding_cells = geometry.compute_colliding_cells(msh, candidates, points)
 
+    cells = np.empty(points.shape[0], dtype=np.int32)
+    for point_index in range(points.shape[0]):
+        links = colliding_cells.links(point_index)
+        cells[point_index] = links[0]
+
+    return cells
+
+
+def create_face_evaluation_data(msh):
+    eps_eval = 1.0e-12
+
+    x_face_points = np.zeros(((nx + 1) * ny, 3), dtype=default_real_type)
+    x_face_locator_points = np.zeros(((nx + 1) * ny, 3), dtype=default_real_type)
+    for i in range(nx + 1):
+        x_face = i * dx
+        x_locator = x_face + eps_eval if i == 0 else x_face - eps_eval
+        for j in range(ny):
+            point_index = i * ny + j
+            y_face = (j + 0.5) * dy
+            x_face_points[point_index, 0] = x_face
+            x_face_points[point_index, 1] = y_face
+            x_face_locator_points[point_index, 0] = x_locator
+            x_face_locator_points[point_index, 1] = y_face
+
+    y_face_points = np.zeros((nx * (ny + 1), 3), dtype=default_real_type)
+    y_face_locator_points = np.zeros((nx * (ny + 1), 3), dtype=default_real_type)
+    for i in range(nx):
+        x_face = (i + 0.5) * dx
+        for j in range(ny + 1):
+            point_index = i * (ny + 1) + j
+            y_face = j * dy
+            y_locator = y_face + eps_eval if j == 0 else y_face - eps_eval
+            y_face_points[point_index, 0] = x_face
+            y_face_points[point_index, 1] = y_face
+            y_face_locator_points[point_index, 0] = x_face
+            y_face_locator_points[point_index, 1] = y_locator
+
+    return {
+        "x_face_points": x_face_points,
+        "x_face_cells": compute_point_cells(msh, x_face_locator_points),
+        "y_face_points": y_face_points,
+        "y_face_cells": compute_point_cells(msh, y_face_locator_points),
+    }
+
+
+def extract_face_velocities(rt_flux, darcy_data):
+    x_values = rt_flux.eval(darcy_data["x_face_points"], darcy_data["x_face_cells"])
+    y_values = rt_flux.eval(darcy_data["y_face_points"], darcy_data["y_face_cells"])
+
+    ux_face = x_values[:, 0].reshape(nx + 1, ny)
+    uy_face = y_values[:, 1].reshape(nx, ny + 1)
+
+    ux_face[0, :] = u_inj
+    uy_face[:, 0] = 0.0
+    uy_face[:, -1] = 0.0
+
+    return ux_face, uy_face
+
+
+def build_face_tags(msh):
+    fdim = msh.topology.dim - 1
     left_facets = mesh.locate_entities_boundary(msh, fdim, lambda x: np.isclose(x[0], 0.0))
     right_facets = mesh.locate_entities_boundary(msh, fdim, lambda x: np.isclose(x[0], Lx))
     bottom_facets = mesh.locate_entities_boundary(msh, fdim, lambda x: np.isclose(x[1], 0.0))
@@ -101,166 +151,109 @@ def create_darcy_data():
     order = np.argsort(facet_indices)
     facet_tag = mesh.meshtags(msh, fdim, facet_indices[order], facet_markers[order])
 
-    dx_measure = ufl.Measure("dx", domain=msh)
-    ds_measure = ufl.Measure("ds", domain=msh, subdomain_data=facet_tag)
-
-    rt_element = create_rt_element(msh)
-    pressure_element = create_pressure_element(msh)
-
-    V = fem.functionspace(msh, rt_element)
-    Q = fem.functionspace(msh, pressure_element)
-    V0 = fem.functionspace(msh, ("DG", 0))
-    system_space = ufl.MixedFunctionSpace(V, Q)
-
-    coords0 = V0.tabulate_dof_coordinates()
-    ii = np.floor(coords0[:, 0] / dx).astype(int)
-    jj = np.floor(coords0[:, 1] / dy).astype(int)
-
-    permeability = load_permeability()
-
-    K = fem.Function(V0, name="Permeability")
-    T = fem.Function(V0, name="TotalMobilityTimesK")
-    K.x.array[:] = permeability[ii, jj]
-    pressure_right_value = fem.Constant(msh, default_real_type(pressure_right))
-
-    dofs_left = fem.locate_dofs_topological(V, fdim, left_facets)
-    dofs_top = fem.locate_dofs_topological(V, fdim, top_facets)
-    dofs_bottom = fem.locate_dofs_topological(V, fdim, bottom_facets)
-
-    cells_left = mesh.compute_incident_entities(msh.topology, left_facets, fdim, tdim)
-
-    prescribed_flux = fem.Function(V, name="PrescribedFlux")
-    prescribed_flux.x.array[:] = 0.0
-    prescribed_flux.interpolate(
-        lambda x: np.vstack((u_inj * np.ones_like(x[0]), np.zeros_like(x[0]))),
-        cells0=cells_left,
-    )
-
-    bc_left = fem.dirichletbc(prescribed_flux, dofs_left)
-    bc_top = fem.dirichletbc(prescribed_flux, dofs_top)
-    bc_bottom = fem.dirichletbc(prescribed_flux, dofs_bottom)
-
     return {
-        "msh": msh,
-        "V": V,
-        "Q": Q,
-        "V0": V0,
-        "system_space": system_space,
-        "K": K,
-        "T": T,
-        "pressure_right_value": pressure_right_value,
-        "dx": dx_measure,
-        "ds": ds_measure,
-        "facet_tag": facet_tag,
+        "fdim": fdim,
         "left_facets": left_facets,
         "right_facets": right_facets,
-        "top_facets": top_facets,
         "bottom_facets": bottom_facets,
-        "bcs": [bc_left, bc_top, bc_bottom],
-        "ii": ii,
-        "jj": jj,
-        "permeability": permeability,
+        "top_facets": top_facets,
+        "facet_tag": facet_tag,
     }
 
 
-def compute_boundary_fluxes(flux, darcy_data):
-    msh = darcy_data["msh"]
-    ds_measure = darcy_data["ds"]
-    normal = ufl.FacetNormal(msh)
+def create_darcy_data():
+    msh = mesh.create_rectangle(
+        MPI.COMM_WORLD,
+        [[0.0, 0.0], [Lx, Ly]],
+        [nx, ny],
+        cell_type=mesh.CellType.quadrilateral,
+    )
+    face_tags = build_face_tags(msh)
+    ds = ufl.Measure("ds", domain=msh, subdomain_data=face_tags["facet_tag"])
 
-    fluxes = {}
-    for marker, name in [(1, "left"), (2, "right"), (3, "bottom"), (4, "top")]:
-        form = fem.form(ufl.dot(flux, normal) * ds_measure(marker))
-        value = fem.assemble_scalar(form)
-        fluxes[name] = msh.comm.allreduce(value, op=MPI.SUM)
+    U = fem.functionspace(msh, create_rt_element(msh))
+    Q = fem.functionspace(msh, create_pressure_element(msh))
 
-    fluxes["mass_in"] = -fluxes["left"]
-    fluxes["mass_out"] = fluxes["right"] + fluxes["top"] + fluxes["bottom"]
-    fluxes["net_outward"] = fluxes["left"] + fluxes["right"] + fluxes["top"] + fluxes["bottom"]
-    fluxes["imbalance"] = fluxes["mass_in"] - fluxes["mass_out"]
-    return fluxes
+    coords = Q.tabulate_dof_coordinates()
+    ii = np.minimum(np.floor(coords[:, 0] / dx).astype(int), nx - 1)
+    jj = np.minimum(np.floor(coords[:, 1] / dy).astype(int), ny - 1)
+
+    K = fem.Function(Q, name="Permeability")
+    T = fem.Function(Q, name="TotalMobilityTimesK")
+    K.x.array[:] = load_permeability()[ii, jj]
+
+    left_cells = mesh.compute_incident_entities(msh.topology, face_tags["left_facets"], face_tags["fdim"], msh.topology.dim)
+    left_dofs = fem.locate_dofs_topological(U, face_tags["fdim"], face_tags["left_facets"])
+    top_dofs = fem.locate_dofs_topological(U, face_tags["fdim"], face_tags["top_facets"])
+    bottom_dofs = fem.locate_dofs_topological(U, face_tags["fdim"], face_tags["bottom_facets"])
+
+    left_flux = fem.Function(U)
+    zero_flux = fem.Function(U)
+    left_flux.interpolate(lambda x: np.vstack((u_inj * np.ones_like(x[0]), np.zeros_like(x[0]))), cells0=left_cells)
+    zero_flux.interpolate(lambda x: np.vstack((np.zeros_like(x[0]), np.zeros_like(x[0]))))
+
+    return {
+        "msh": msh,
+        "U": U,
+        "Q": Q,
+        "K": K,
+        "T": T,
+        "ds": ds,
+        "ii": ii,
+        "jj": jj,
+        "bcs": [
+            fem.dirichletbc(left_flux, left_dofs),
+            fem.dirichletbc(zero_flux, top_dofs),
+            fem.dirichletbc(zero_flux, bottom_dofs),
+        ],
+        **create_face_evaluation_data(msh),
+    }
 
 
-def solve_darcy(Sw, nD, darcy_data, return_diagnostics=False):
-    V = darcy_data["V"]
-    Q = darcy_data["Q"]
-    V0 = darcy_data["V0"]
-    system_space = darcy_data["system_space"]
+def solve_darcy(Sw, nD, darcy_data):
+    U_space = darcy_data["U"]
+    Q_space = darcy_data["Q"]
     K = darcy_data["K"]
     T = darcy_data["T"]
-    pressure_right_value = darcy_data["pressure_right_value"]
-    dx_measure = darcy_data["dx"]
-    ds_measure = darcy_data["ds"]
-    bcs = darcy_data["bcs"]
+    ds = darcy_data["ds"]
     ii = darcy_data["ii"]
     jj = darcy_data["jj"]
 
-    lambda_t = lambda_total(Sw, nD)
-    T.x.array[:] = K.x.array * lambda_t[ii, jj]
+    T.x.array[:] = K.x.array * lambda_total(Sw, nD)[ii, jj]
 
-    sigma, pressure = ufl.TrialFunctions(system_space)
-    tau, w = ufl.TestFunctions(system_space)
-    normal = ufl.FacetNormal(darcy_data["msh"])
+    W = ufl.MixedFunctionSpace(U_space, Q_space)
+    flux, pressure = ufl.TrialFunctions(W)
+    tau, v = ufl.TestFunctions(W)
+    zero = fem.Constant(darcy_data["msh"], ScalarType(0.0))
 
-    inv_T = 1.0 / T
-    mixed_form = (
-        inv_T * ufl.inner(sigma, tau) * dx_measure
-        - pressure * ufl.div(tau) * dx_measure
-        + ufl.div(sigma) * w * dx_measure
+    a = ufl.extract_blocks(
+        (1.0 / T) * ufl.inner(flux, tau) * ufl.dx
+        - pressure * ufl.div(tau) * ufl.dx
+        + ufl.div(flux) * v * ufl.dx
+        + zero * pressure * v * ufl.dx
     )
-    a = ufl.extract_blocks(mixed_form)
-    L = [
-        -pressure_right_value * ufl.dot(tau, normal) * ds_measure(2),
-        ufl.ZeroBaseForm((w,)),
-    ]
-    a_p = ufl.extract_blocks(
-        inv_T * ufl.inner(sigma, tau) * dx_measure
-        + ufl.inner(ufl.div(sigma), ufl.div(tau)) * dx_measure
-        + pressure * w * dx_measure
-    )
+    L = [zero * ufl.dot(tau, ufl.FacetNormal(darcy_data["msh"])) * ds(2), ufl.ZeroBaseForm((v,))]
 
-    flux_solution = fem.Function(V, name="Flux")
-    pressure_solution = fem.Function(Q, name="Pressure")
-
+    U_h = fem.Function(U_space, name="Flux")
+    pressure_h = fem.Function(Q_space, name="Pressure")
     problem = LinearProblem(
         a,
         L,
-        u=[flux_solution, pressure_solution],
-        P=a_p,
-        kind="nest",
-        bcs=bcs,
-        petsc_options_prefix="rt_mixed_darcy_",
+        u=[U_h, pressure_h],
+        kind="mpi",
+        bcs=darcy_data["bcs"],
+        petsc_options_prefix="mixed_rt_darcy_",
         petsc_options={
-            "ksp_type": "gmres",
-            "pc_type": "fieldsplit",
-            "pc_fieldsplit_type": "additive",
-            "ksp_rtol": 1.0e-10,
-            "ksp_gmres_restart": 100,
+            "ksp_type": "preonly",
+            "pc_type": "lu",
+            "pc_factor_mat_solver_type": "mumps",
         },
     )
-
     problem.solve()
 
-    ux_fun = fem.Function(V0, name="ux")
-    uy_fun = fem.Function(V0, name="uy")
-
-    expr_ux = fem.Expression(flux_solution[0], V0.element.interpolation_points)
-    expr_uy = fem.Expression(flux_solution[1], V0.element.interpolation_points)
-
-    ux_fun.interpolate(expr_ux)
-    uy_fun.interpolate(expr_uy)
-
-    ux = np.zeros((nx, ny), dtype=np.float64)
-    uy = np.zeros((nx, ny), dtype=np.float64)
-    ux[ii, jj] = ux_fun.x.array
-    uy[ii, jj] = uy_fun.x.array
+    ux_face, uy_face = extract_face_velocities(U_h, darcy_data)
 
     pressure_array = np.zeros((nx, ny), dtype=np.float64)
-    pressure_array[ii, jj] = pressure_solution.x.array
+    pressure_array[ii, jj] = pressure_h.x.array
 
-    mass_balance = compute_boundary_fluxes(flux_solution, darcy_data)
-
-    if return_diagnostics:
-        return pressure_solution, ux, uy, pressure_array, flux_solution, mass_balance
-
-    return pressure_solution, ux, uy
+    return pressure_h, ux_face, uy_face, pressure_array

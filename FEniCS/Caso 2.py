@@ -1,4 +1,5 @@
 from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -10,7 +11,6 @@ from RT_FEM import ny
 from RT_FEM import solve_darcy
 
 
-# Parametros
 muw = 1.0e-3
 mug = 2.0e-5
 Swc = 0.2
@@ -24,7 +24,6 @@ nd_inj = 0.0
 A_foam = 400.0
 Kc = 1.0e-6
 
-# Malha
 dx = Lx / nx
 dy = Ly / ny
 phi_value = 0.2
@@ -37,7 +36,7 @@ eps = 1.0e-12
 
 output_dir = Path("output")
 
-# Funcoes
+
 def create_coordinates():
     x = np.linspace(dx / 2, Lx - dx / 2, nx)
     y = np.linspace(dy / 2, Ly - dy / 2, ny)
@@ -142,7 +141,6 @@ def initial_condition():
 
 
 def apply_bc(S):
-   # S[0, :, :] = np.clip(S[0, :, :], Swc, 1.0)
     S[0, 0, :] = Sw_inj
     S[1, 0, :] = Sg(Sw_inj) * nd_inj
     S[1, :, :] = np.maximum(S[1, :, :], 0.0)
@@ -177,7 +175,7 @@ def KNP_flux_x(S, ux, phi):
             Sg_R = Sg(Sw_R)
             nD_L = S_L[1, i, j] / Sg_L if Sg_L > 1.0e-12 else 0.0
             nD_R = S_R[1, i, j] / Sg_R if Sg_R > 1.0e-12 else 0.0
-            u_face = 0.5 * (ux[i, j] + ux[i + 1, j])
+            u_face = ux[i + 1, j]
             phi_face = 0.5 * (phi[i, j] + phi[i + 1, j])
             l1_L, l2_L = eigvals(Sw_L, nD_L, u_face, phi_face)
             l1_R, l2_R = eigvals(Sw_R, nD_R, u_face, phi_face)
@@ -187,8 +185,7 @@ def KNP_flux_x(S, ux, phi):
             hR = flux_x(Sw_R, nD_R, u_face)
             sL = S_L[:, i, j]
             sR = S_R[:, i, j]
-            denom = a_plus - a_minus + eps
-            H[:, i, j] = (a_plus * hL - a_minus * hR + a_plus * a_minus * (sR - sL)) / denom
+            H[:, i, j] = (a_plus * hL - a_minus * hR + a_plus * a_minus * (sR - sL)) / (a_plus - a_minus + eps)
 
     return H
 
@@ -208,7 +205,7 @@ def KNP_flux_y(S, uy, phi):
             Sg_R = Sg(Sw_R)
             nD_L = S_L[1, i, j] / Sg_L if Sg_L > 1.0e-12 else 0.0
             nD_R = S_R[1, i, j] / Sg_R if Sg_R > 1.0e-12 else 0.0
-            v_face = 0.5 * (uy[i, j] + uy[i, j + 1])
+            v_face = uy[i, j + 1]
             phi_face = 0.5 * (phi[i, j] + phi[i, j + 1])
             l1_L, l2_L = eigvals(Sw_L, nD_L, v_face, phi_face)
             l1_R, l2_R = eigvals(Sw_R, nD_R, v_face, phi_face)
@@ -218,8 +215,7 @@ def KNP_flux_y(S, uy, phi):
             hR = flux_y(Sw_R, nD_R, v_face)
             sL = S_L[:, i, j]
             sR = S_R[:, i, j]
-            denom = a_plus - a_minus + eps
-            H[:, i, j] = (a_plus * hL - a_minus * hR + a_plus * a_minus * (sR - sL)) / denom
+            H[:, i, j] = (a_plus * hL - a_minus * hR + a_plus * a_minus * (sR - sL)) / (a_plus - a_minus + eps)
 
     return H
 
@@ -227,7 +223,7 @@ def KNP_flux_y(S, uy, phi):
 def compute_rhs(S, ux, uy, phi):
     Hx = KNP_flux_x(S, ux, phi)
     Hy = KNP_flux_y(S, uy, phi)
-    L = np.zeros_like(S)
+    rhs = np.zeros_like(S)
 
     f_in = np.zeros((2, ny))
     for j in range(ny):
@@ -239,19 +235,25 @@ def compute_rhs(S, ux, uy, phi):
     for j in range(ny):
         f_out[:, j] = flux_x(Sw_out[j], nD_out[j], ux[-1, j])
 
-    L[:, 0, :] -= (Hx[:, 0, :] - f_in) / dx
-    L[:, 1:-1, :] -= (Hx[:, 1:, :] - Hx[:, :-1, :]) / dx
-    L[:, -1, :] -= (f_out - Hx[:, -1, :]) / dx
+    rhs[:, 0, :] -= (Hx[:, 0, :] - f_in) / dx
+    rhs[:, 1:-1, :] -= (Hx[:, 1:, :] - Hx[:, :-1, :]) / dx
+    rhs[:, -1, :] -= (f_out - Hx[:, -1, :]) / dx
 
     if ny > 1 and np.max(np.abs(uy)) > 0.0:
-        L[:, :, 0] -= Hy[:, :, 0] / dy
-        if ny > 2:
-            L[:, :, 1:-1] -= (Hy[:, :, 1:] - Hy[:, :, :-1]) / dy
-        L[:, :, -1] += Hy[:, :, -1] / dy
+        nD_now = extract_nD(S)
+        f_bottom = np.zeros((2, nx))
+        f_top = np.zeros((2, nx))
+        for i in range(nx):
+            f_bottom[:, i] = flux_y(S[0, i, 0], nD_now[i, 0], uy[i, 0])
+            f_top[:, i] = flux_y(S[0, i, -1], nD_now[i, -1], uy[i, -1])
 
-    src = foam_source(S, phi)
-    L = L / (phi[np.newaxis, :, :] + eps) + src / (phi[np.newaxis, :, :] + eps)
-    return L
+        rhs[:, :, 0] -= (Hy[:, :, 0] - f_bottom) / dy
+        if ny > 2:
+            rhs[:, :, 1:-1] -= (Hy[:, :, 1:] - Hy[:, :, :-1]) / dy
+        rhs[:, :, -1] -= (f_top - Hy[:, :, -1]) / dy
+
+    rhs += foam_source(S, phi)
+    return rhs / (phi[np.newaxis, :, :] + eps)
 
 
 def ssprk3(S, dt, ux, uy, phi):
@@ -271,85 +273,84 @@ def compute_dt(S, ux, uy, phi):
     Swp = Sw + h
     Swm = Sw - h
     dfw = (fw(Swp, nD) - fw(Swm, nD)) / (Swp - Swm + eps)
+    ux_cell = np.maximum(np.abs(ux[:-1, :]), np.abs(ux[1:, :]))
+    uy_cell = np.maximum(np.abs(uy[:, :-1]), np.abs(uy[:, 1:]))
     ax = np.maximum(
-        np.abs(ux) * np.abs(dfw) / phi,
-        np.abs(ux) * np.abs(fg(Sw, nD)) / (phi * Sg_now + eps),
+        ux_cell * np.abs(dfw) / phi,
+        ux_cell * np.abs(fg(Sw, nD)) / (phi * Sg_now + eps),
     )
     ay = np.maximum(
-        np.abs(uy) * np.abs(dfw) / phi,
-        np.abs(uy) * np.abs(fg(Sw, nD)) / (phi * Sg_now + eps),
+        uy_cell * np.abs(dfw) / phi,
+        uy_cell * np.abs(fg(Sw, nD)) / (phi * Sg_now + eps),
     )
     dt_x = np.where(ax > 1.0e-30, dx / (ax + eps), 1.0e30)
     dt_y = np.where(ay > 1.0e-30, dy / (ay + eps), 1.0e30)
-    
-    print(f'{cfl * np.min(np.minimum(dt_x, dt_y))}')
     return cfl * np.min(np.minimum(dt_x, dt_y))
 
 
 def advance_transport(S, ux, uy, phi, t_start, t_stop):
     t = t_start
-    steps = 0
-
+    step = 0
     while t < t_stop:
         dt = compute_dt(S, ux, uy, phi)
         if t + dt > t_stop:
             dt = t_stop - t
         S = ssprk3(S, dt, ux, uy, phi)
         t += dt
-        steps += 1
-        print(f"Transport step {steps}: t = {t:.2f}/{t_stop:.2f} s, dt = {dt:.2e} s")
+        step += 1
+        print(f"Transport step {step}: t = {t:.2f}/{t_stop:.2f} s, dt = {dt:.2e} s")
+    return S, t
 
-    return S, t, steps
 
 def run_simulation():
-    phi = np.ones((nx, ny)) * phi_value
+    phi = np.full((nx, ny), phi_value)
     darcy_data = create_darcy_data()
     S = apply_bc(initial_condition())
-
     t = 0.0
-    macro_steps = 0
-    transport_steps = 0
-    pressure = None
+    macro_step = 0
     ux = None
     uy = None
+    pressure_array = None
 
     while t < t_final:
-        Sw = S[0]
+        _, ux, uy, pressure_array = solve_darcy(S[0], extract_nD(S), darcy_data)
+        t_macro = min(t + dt_u, t_final)
+        S, t = advance_transport(S, ux, uy, phi, t, t_macro)
+        macro_step += 1
+        print(f"Macro step {macro_step}: t = {t:.2f}/{t_final:.2f} s")
 
-        Sw_before = S[0].copy()
-
-        nD = extract_nD(S)
-        pressure, ux, uy = solve_darcy(Sw, nD, darcy_data)
-
-        print(f"ux médio = {np.mean(ux):.6e}")
-        print(f"uy médio = {np.mean(uy):.6e}")
-
-        t_macro = t + dt_u
-        if t_macro > t_final:
-            t_macro = t_final
-
-        S, t, local_steps = advance_transport(S, ux, uy, phi, t, t_macro)
-
-        Sw_after = S[0]
-        dSw = Sw_after - Sw_before
-
-        print(f"dSw médio = {np.mean(np.abs(dSw)):.6e}")
-
-        for i in [0, 1, 2, 3, 4, 5, 10, 20]:
-             print(f"col {i:3d} Sw médio = {np.mean(S[0][i, :]):.6f}")
+    save_results(S, ux, uy, pressure_array)
 
 
-        macro_steps += 1
-        transport_steps += local_steps
+def write_scalar_values(file, values):
+    for value in values.ravel(order="F"):
+        file.write(f"{value:.16e}\n")
 
-        print(
-            f"Macro step {macro_steps}: t = {t:.2f}/{t_final:.2f} s, "
-            f"transport steps = {local_steps}"
-        )
 
-    save_results(S)
+def write_vector_values(file, vx, vy):
+    for vx_value, vy_value in zip(vx.ravel(order="F"), vy.ravel(order="F")):
+        file.write(f"{vx_value:.16e} {vy_value:.16e} 0.0\n")
 
-def save_results(S):
+
+def save_vtk_results(S, ux=None, uy=None, pressure_array=None):
+    vtk_path = output_dir / "resultado_final.vtk"
+
+    with vtk_path.open("w") as file:
+
+        file.write("SCALARS Sw")
+        write_scalar_values(file, S[0])
+
+        file.write("SCALARS pressure")
+        write_scalar_values(file, pressure_array)
+
+        ux_cell = 0.5 * (ux[:-1, :] + ux[1:, :])
+        uy_cell = 0.5 * (uy[:, :-1] + uy[:, 1:])
+
+        file.write("VECTORS velocity")
+        write_vector_values(file, ux_cell, uy_cell)
+
+
+def save_results(S, ux=None, uy=None, pressure_array=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     X, Y = create_coordinates()
     plt.figure(figsize=(12, 4))
@@ -360,5 +361,8 @@ def save_results(S):
     plt.title("Water saturation in the porous medium")
     plt.tight_layout()
     plt.savefig(output_dir / "saturacao_final_coupled.png", dpi=200)
+    plt.close()
+    save_vtk_results(S, ux, uy, pressure_array)
+
 
 run_simulation()
