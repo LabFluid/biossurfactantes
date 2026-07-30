@@ -15,6 +15,10 @@ mug = 2.0e-5
 Swc = 0.2
 Sgr = 0.0
 u_inj = 3.0e-5
+nmax = 8.0e13
+alpha_foam = 7.0e-16
+foam_exponent = 2.0 / 3.0
+phi_value = 0.2
 
 Lx = 3.67
 Ly = 1.0
@@ -29,8 +33,12 @@ eps = 1.0e-12
 
 def load_permeability():
     data = Path(permeability_file).read_text().splitlines()
-    perm_raw = np.array([float(value) for value in data], dtype=np.float64).reshape(ny, nx).T
+    perm_raw = np.array([float(value) for value in data]).reshape(ny, nx).T
     return perm_raw * 9.869233e-16
+
+
+def Sg(Sw):
+    return 1.0 - Sw
 
 
 def krw(Sw):
@@ -38,30 +46,50 @@ def krw(Sw):
     return np.maximum(0.0, Se) ** 4
 
 
-def krg0(Sw):
+def krg(Sw):
     Sge = (1.0 - Sw - Sgr) / (1.0 - Swc - Sgr + eps)
     return np.maximum(0.0, Sge) ** 2
-
-
-def krg(Sw, nD):
-    return krg0(Sw) / (18500.0 * nD + 1.0)
 
 
 def lambda_w(Sw):
     return krw(Sw) / muw
 
 
-def lambda_g(Sw, nD):
-    return krg(Sw, nD) / mug
+def foam_viscosity(Sw, nD, u=u_inj):
+    Sw, nD, u = np.broadcast_arrays(Sw, nD, np.abs(u))
+
+    mu = np.full_like(Sw, mug)
+    sg = np.maximum(Sg(Sw), 0.0)
+    krg_value = krg(Sw)
+    lw = lambda_w(Sw)
+    nf = np.maximum(nD, 0.0) * nmax
+
+    active = (nf > 0.0) & (u > eps) & (sg > eps) & (krg_value > eps) & (lw > eps)
+    if not np.any(active):
+        return mu
+
+    beta = phi_value * sg[active] / (krg_value[active] * u[active] + eps)
+    a = alpha_foam * nf[active] * lw[active] * beta**foam_exponent / 3.0
+    b = (krg_value[active] + lw[active] * mug) / 2.0
+    a3 = a**3
+
+    sqrt_term = np.sqrt(2.0 * a3 * b + b**2)
+    root = a + np.cbrt(a3 + b + sqrt_term) + np.cbrt(a3 + b - sqrt_term)
+
+    mu[active] = mug + 3.0 * a * root**2 / (lw[active] + eps)
+    return np.maximum(mu, mug)
 
 
-def lambda_total(Sw, nD):
-    return lambda_w(Sw) + lambda_g(Sw, nD)
+def lambda_g(Sw, nD, u=u_inj):
+    return krg(Sw) / foam_viscosity(Sw, nD, u)
+
+
+def lambda_total(Sw, nD, u=u_inj):
+    return lambda_w(Sw) + lambda_g(Sw, nD, u)
 
 
 def create_rt_element(msh):
     return element("RT", msh.basix_cell(), 1, dtype=default_real_type)
-
 
 
 def create_pressure_element(msh):
@@ -71,44 +99,45 @@ def create_pressure_element(msh):
 def compute_point_cells(msh, points):
     tree = geometry.bb_tree(msh, msh.topology.dim)
     candidates = geometry.compute_collisions_points(tree, points)
-    colliding_cells = geometry.compute_colliding_cells(msh, candidates, points)
+    colliding = geometry.compute_colliding_cells(msh, candidates, points)
 
-    cells = np.empty(points.shape[0], dtype=np.int32)
-    for point_index in range(points.shape[0]):
-        links = colliding_cells.links(point_index)
-        cells[point_index] = links[0]
+    return np.array(
+        [colliding.links(i)[0] for i in range(points.shape[0])],
+    )
 
-    return cells
+
+def make_points(x, y):
+    X, Y = np.meshgrid(x, y, indexing="ij")
+    points = np.zeros((X.size, 3), dtype=default_real_type)
+    points[:, 0] = X.ravel()
+    points[:, 1] = Y.ravel()
+    return points
 
 
 def create_face_evaluation_data(msh):
-    eps_eval = 1.0e-12
+    tol = 1.0e-12
 
-    x_face_points = np.zeros(((nx + 1) * ny, 3), dtype=default_real_type)
-    x_face_locator_points = np.zeros(((nx + 1) * ny, 3), dtype=default_real_type)
-    for i in range(nx + 1):
-        x_face = i * dx
-        x_locator = x_face + eps_eval if i == 0 else x_face - eps_eval
-        for j in range(ny):
-            point_index = i * ny + j
-            y_face = (j + 0.5) * dy
-            x_face_points[point_index, 0] = x_face
-            x_face_points[point_index, 1] = y_face
-            x_face_locator_points[point_index, 0] = x_locator
-            x_face_locator_points[point_index, 1] = y_face
+    x_faces = np.linspace(0.0, Lx, nx + 1)
+    y_centers = (np.arange(ny) + 0.5) * dy
 
-    y_face_points = np.zeros((nx * (ny + 1), 3), dtype=default_real_type)
-    y_face_locator_points = np.zeros((nx * (ny + 1), 3), dtype=default_real_type)
-    for i in range(nx):
-        x_face = (i + 0.5) * dx
-        for j in range(ny + 1):
-            point_index = i * (ny + 1) + j
-            y_face = j * dy
-            y_locator = y_face + eps_eval if j == 0 else y_face - eps_eval
-            y_face_points[point_index, 0] = x_face
-            y_face_points[point_index, 1] = y_face
-            y_face_locator_points[point_index, 0] = x_face
-            y_face_locator_points[point_index, 1] = y_locator
+    x_face_points = make_points(x_faces, y_centers)
+
+    x_locator = x_faces.copy()
+    x_locator[0] += tol
+    x_locator[1:] -= tol
+
+    x_face_locator_points = make_points(x_locator, y_centers)
+
+    x_centers = (np.arange(nx) + 0.5) * dx
+    y_faces = np.linspace(0.0, Ly, ny + 1)
+
+    y_face_points = make_points(x_centers, y_faces)
+
+    y_locator = y_faces.copy()
+    y_locator[0] += tol
+    y_locator[1:] -= tol
+
+    y_face_locator_points = make_points(x_centers, y_locator)
 
     return {
         "x_face_points": x_face_points,
@@ -119,8 +148,15 @@ def create_face_evaluation_data(msh):
 
 
 def extract_face_velocities(rt_flux, darcy_data):
-    x_values = rt_flux.eval(darcy_data["x_face_points"], darcy_data["x_face_cells"])
-    y_values = rt_flux.eval(darcy_data["y_face_points"], darcy_data["y_face_cells"])
+    x_values = rt_flux.eval(
+        darcy_data["x_face_points"],
+        darcy_data["x_face_cells"],
+    )
+
+    y_values = rt_flux.eval(
+        darcy_data["y_face_points"],
+        darcy_data["y_face_cells"],
+    )
 
     ux_face = x_values[:, 0].reshape(nx + 1, ny)
     uy_face = y_values[:, 1].reshape(nx, ny + 1)
@@ -148,6 +184,7 @@ def build_face_tags(msh):
             np.full_like(top_facets, 4),
         ]
     )
+
     order = np.argsort(facet_indices)
     facet_tag = mesh.meshtags(msh, fdim, facet_indices[order], facet_markers[order])
 
@@ -168,6 +205,7 @@ def create_darcy_data():
         [nx, ny],
         cell_type=mesh.CellType.quadrilateral,
     )
+
     face_tags = build_face_tags(msh)
     ds = ufl.Measure("ds", domain=msh, subdomain_data=face_tags["facet_tag"])
 
@@ -182,14 +220,24 @@ def create_darcy_data():
     T = fem.Function(Q, name="TotalMobilityTimesK")
     K.x.array[:] = load_permeability()[ii, jj]
 
-    left_cells = mesh.compute_incident_entities(msh.topology, face_tags["left_facets"], face_tags["fdim"], msh.topology.dim)
+    left_cells = mesh.compute_incident_entities(
+        msh.topology,
+        face_tags["left_facets"],
+        face_tags["fdim"],
+        msh.topology.dim,
+    )
+
     left_dofs = fem.locate_dofs_topological(U, face_tags["fdim"], face_tags["left_facets"])
     top_dofs = fem.locate_dofs_topological(U, face_tags["fdim"], face_tags["top_facets"])
     bottom_dofs = fem.locate_dofs_topological(U, face_tags["fdim"], face_tags["bottom_facets"])
 
     left_flux = fem.Function(U)
     zero_flux = fem.Function(U)
-    left_flux.interpolate(lambda x: np.vstack((u_inj * np.ones_like(x[0]), np.zeros_like(x[0]))), cells0=left_cells)
+
+    left_flux.interpolate(
+        lambda x: np.vstack((u_inj * np.ones_like(x[0]), np.zeros_like(x[0]))),
+        cells0=left_cells,
+    )
     zero_flux.interpolate(lambda x: np.vstack((np.zeros_like(x[0]), np.zeros_like(x[0]))))
 
     return {
@@ -219,7 +267,7 @@ def solve_darcy(Sw, nD, darcy_data):
     ii = darcy_data["ii"]
     jj = darcy_data["jj"]
 
-    T.x.array[:] = K.x.array * lambda_total(Sw, nD)[ii, jj]
+    T.x.array[:] = K.x.array * lambda_total(Sw, nD, u_inj)[ii, jj]
 
     W = ufl.MixedFunctionSpace(U_space, Q_space)
     flux, pressure = ufl.TrialFunctions(W)
@@ -232,10 +280,14 @@ def solve_darcy(Sw, nD, darcy_data):
         + ufl.div(flux) * v * ufl.dx
         + zero * pressure * v * ufl.dx
     )
-    L = [zero * ufl.dot(tau, ufl.FacetNormal(darcy_data["msh"])) * ds(2), ufl.ZeroBaseForm((v,))]
+    L = [
+        zero * ufl.dot(tau, ufl.FacetNormal(darcy_data["msh"])) * ds(2),
+        ufl.ZeroBaseForm((v,)),
+    ]
 
     U_h = fem.Function(U_space, name="Flux")
     pressure_h = fem.Function(Q_space, name="Pressure")
+
     problem = LinearProblem(
         a,
         L,
@@ -250,10 +302,11 @@ def solve_darcy(Sw, nD, darcy_data):
         },
     )
     problem.solve()
+    
 
     ux_face, uy_face = extract_face_velocities(U_h, darcy_data)
 
-    pressure_array = np.zeros((nx, ny), dtype=np.float64)
+    pressure_array = np.zeros((nx, ny))
     pressure_array[ii, jj] = pressure_h.x.array
 
     return pressure_h, ux_face, uy_face, pressure_array

@@ -38,7 +38,8 @@ eps = 1.0e-12
 
 output_dir = Path("output")
 snapshot_file = Path("snap.txt")
-snapshot_interval = 10.0
+snapshot_interval = 50.0
+next_snapshot_interval = snapshot_interval
 
 
 def Sg(Sw):
@@ -55,12 +56,12 @@ def nd_le(Sw):
 
 
 def krw(Sw):
-    Se = (Sw - Swc) / (1.0 - Swc - Sgr + eps)
+    Se = (Sw - Swc) / (1.0 - Swc - Sgr)
     return np.maximum(0.0, Se) ** 4
 
 
 def krg(Sw):
-    Sge = (1.0 - Sw - Sgr) / (1.0 - Swc - Sgr + eps)
+    Sge = (1.0 - Sw - Sgr) / (1.0 - Swc - Sgr)
     return np.maximum(0.0, Sge) ** 2
 
 
@@ -69,34 +70,35 @@ def lambda_w(Sw):
 
 
 def foam_viscosity(Sw, nD, u=u_inj):
-    Sw, nD, u = np.broadcast_arrays(Sw, nD, np.abs(u))
+    if isinstance(Sw, np.ndarray):
+        Sw, nD, u = np.broadcast_arrays(Sw, nD, np.abs(u))
+        mu, sg, krg_val, lw, nf = np.full_like(Sw, mug), np.maximum(1-Sw, 0), krg(Sw), lambda_w(Sw), np.maximum(nD, 0)*nmax
+        act = (nf > 0) & (sg > eps)
+        
+        if np.any(act):
+            a = alpha_foam * nf[act] * lw[act] * (phi_value * sg[act] / (krg_val[act] * u[act] + eps))**foam_exponent / 3.0
+            b = (krg_val[act] + lw[act] * mug) / 2.0
+            sq = np.sqrt(2.0 * a**3 * b + b**2)
+            mu[act] = mug + 3.0 * a * (a + np.cbrt(a**3 + b + sq) + np.cbrt(a**3 + b - sq))**2 / lw[act]
+        return np.maximum(mu, mug)
 
-    mu = np.full_like(Sw, mug, dtype=np.float64)
-    sg = np.maximum(Sg(Sw), 0.0)
-    krg_value = krg(Sw)
-    lw = lambda_w(Sw)
-    nf = np.maximum(nD, 0.0) * nmax
+    u_abs, sg, nf = abs(u), max(1.0 - Sw, 0.0), max(nD, 0.0) * nmax
+    krg_val, lw = krg_s(Sw), lambda_w_s(Sw)
+    
+    if (nf > 0) and (sg > eps):
+        a = alpha_foam * nf * lw * (phi_value * sg / (krg_val * u_abs))**foam_exponent / 3.0
+        b = (krg_val + lw * mug) / 2.0
+        sq = np.sqrt(2.0 * a**3 * b + b**2)
+        root = a + np.cbrt(a**3 + b + sq) + np.cbrt(a**3 + b - sq)
+        return max(mug + 3.0 * a * root**2 / lw , mug)
+        
+    return mug
 
-    active = (nf > 0.0) & (u > eps) & (sg > eps) & (krg_value > eps) & (lw > eps)
-    if not np.any(active):
-        return mu
-
-    beta = phi_value * sg[active] / (krg_value[active] * u[active] + eps)
-    a = alpha_foam * nf[active] * lw[active] * beta**foam_exponent / 3.0
-    b = (krg_value[active] + lw[active] * mug) / 2.0
-    a3 = a**3
-
-    sqrt_term = np.sqrt(2.0 * a3 * b + b**2)
-    root = a + np.cbrt(a3 + b + sqrt_term) + np.cbrt(a3 + b - sqrt_term)
-    mu[active] = mug + 3.0 * a * root**2 / (lw[active] + eps)
-
-    return np.maximum(mu, mug)
-
-
+    
 def fw(Sw, nD, u=u_inj):
     lw = lambda_w(Sw)
     lg = krg(Sw) / foam_viscosity(Sw, nD, u)
-    return lw / (lw + lg + eps)
+    return lw / (lw + lg)
 
 
 def fg(Sw, nD, u=u_inj):
@@ -106,6 +108,30 @@ def fg(Sw, nD, u=u_inj):
 def flux(Sw, nD, vel):
     fw_value = fw(Sw, nD, np.abs(vel))
     return np.array([vel * fw_value, vel * nD * (1.0 - fw_value)])
+
+
+def krw_s(Sw):
+    Se = (Sw - Swc) / (1.0 - Swc - Sgr)
+    if Se < 0.0:
+        Se = 0.0
+    return Se ** 4
+
+
+def krg_s(Sw):
+    Sge = (1.0 - Sw - Sgr) / (1.0 - Swc - Sgr)
+    if Sge < 0.0:
+        Sge = 0.0
+    return Sge ** 2
+
+
+def lambda_w_s(Sw):
+    return krw_s(Sw) / muw
+
+
+def fw_s(Sw, nD, u):
+    lw = lambda_w_s(Sw)
+    lg = krg_s(Sw) / foam_viscosity(Sw, nD, u)
+    return lw / (lw + lg)
 
 
 def minmod(a, b, c):
@@ -144,83 +170,129 @@ def reconstruct(S, axis):
 
 
 def state_flux_eigs(Sw, nD, vel, phi_face):
-    vel_abs = np.abs(vel)
-    fw_value = fw(Sw, nD, vel_abs)
+    vel_abs = abs(vel)
+    fw_value = fw_s(Sw, nD, vel_abs)
     fg_value = 1.0 - fw_value
 
     h = 1.0e-7
-    dfw = (fw(Sw + h, nD, vel_abs) - fw(Sw - h, nD, vel_abs)) / (2.0 * h + eps)
+    dfw = (fw_s(Sw + h, nD, vel_abs) - fw_s(Sw - h, nD, vel_abs)) / (2.0 * h)
 
-    sg = np.maximum(Sg(Sw), 1.0e-10)
-    l1 = vel * dfw / (phi_face + eps)
-    l2 = vel * fg_value / ((phi_face + eps) * sg)
+    sg = 1.0 - Sw
+    if sg < 1.0e-10:
+        sg = 1.0e-10
+
+    l1 = vel * dfw / phi_face
+    l2 = vel * fg_value / (sg * phi_face)
 
     return l1, l2, vel * fw_value, vel * nD * fg_value
 
 
 def KNP_flux_x(S, ux, phi):
     S_L, S_R = reconstruct(S, axis=1)
-    H = np.zeros((2, nx - 1, ny), dtype=np.float64)
+    H = np.zeros((2, nx - 1, ny))
 
     for i in range(nx - 1):
         for j in range(ny):
-            Sw_L = S_L[0, i, j]
-            Sw_R = S_R[0, i, j]
-            Sg_L = Sg(Sw_L)
-            Sg_R = Sg(Sw_R)
+            Sw_L = (S_L[0, i, j])
+            Sw_R = (S_R[0, i, j])
+            S1_L = (S_L[1, i, j])
+            S1_R = (S_R[1, i, j])
 
-            nD_L = S_L[1, i, j] / (Sg_L + eps) if Sg_L > 1.0e-12 else 0.0
-            nD_R = S_R[1, i, j] / (Sg_R + eps) if Sg_R > 1.0e-12 else 0.0
+            Sg_L = 1.0 - Sw_L
+            Sg_R = 1.0 - Sw_R
 
-            vel = ux[i + 1, j]
-            phi_face = 0.5 * (phi[i, j] + phi[i + 1, j])
+            nD_L = S1_L / (Sg_L) if Sg_L > 1.0e-12 else 0.0
+            nD_R = S1_R / (Sg_R) if Sg_R > 1.0e-12 else 0.0
+
+            vel = (ux[i + 1, j])
+            phi_face = 0.5 * ((phi[i, j]) + (phi[i + 1, j]))
 
             l1_L, l2_L, fL0, fL1 = state_flux_eigs(Sw_L, nD_L, vel, phi_face)
             l1_R, l2_R, fR0, fR1 = state_flux_eigs(Sw_R, nD_R, vel, phi_face)
 
             ap = max(0.0, l1_L, l2_L, l1_R, l2_R)
             am = min(0.0, l1_L, l2_L, l1_R, l2_R)
+
             den = ap - am + eps
             diff = ap * am
 
-            H[0, i, j] = (ap * fL0 - am * fR0 + diff * (S_R[0, i, j] - S_L[0, i, j])) / den
-            H[1, i, j] = (ap * fL1 - am * fR1 + diff * (S_R[1, i, j] - S_L[1, i, j])) / den
+            H[0, i, j] = (ap * fL0 - am * fR0 + diff * (Sw_R - Sw_L)) / den
+            H[1, i, j] = (ap * fL1 - am * fR1 + diff * (S1_R - S1_L)) / den
 
     return H
 
 
 def KNP_flux_y(S, uy, phi):
     if np.max(np.abs(uy)) == 0.0:
-        return np.zeros((2, nx, ny - 1), dtype=np.float64)
+        return np.zeros((2, nx, ny - 1))
 
     S_L, S_R = reconstruct(S, axis=2)
-    H = np.zeros((2, nx, ny - 1), dtype=np.float64)
+    H = np.zeros((2, nx, ny - 1))
 
     for i in range(nx):
         for j in range(ny - 1):
-            Sw_L = S_L[0, i, j]
-            Sw_R = S_R[0, i, j]
-            Sg_L = Sg(Sw_L)
-            Sg_R = Sg(Sw_R)
+            Sw_L = (S_L[0, i, j])
+            Sw_R = (S_R[0, i, j])
+            S1_L = (S_L[1, i, j])
+            S1_R = (S_R[1, i, j])
 
-            nD_L = S_L[1, i, j] / (Sg_L + eps) if Sg_L > 1.0e-12 else 0.0
-            nD_R = S_R[1, i, j] / (Sg_R + eps) if Sg_R > 1.0e-12 else 0.0
+            Sg_L = 1.0 - Sw_L
+            Sg_R = 1.0 - Sw_R
 
-            vel = uy[i, j + 1]
-            phi_face = 0.5 * (phi[i, j] + phi[i, j + 1])
+            nD_L = S1_L / (Sg_L) if Sg_L > 1.0e-12 else 0.0
+            nD_R = S1_R / (Sg_R) if Sg_R > 1.0e-12 else 0.0
+
+            vel = (uy[i, j + 1])
+            phi_face = 0.5 * ((phi[i, j]) + (phi[i, j + 1]))
 
             l1_L, l2_L, fL0, fL1 = state_flux_eigs(Sw_L, nD_L, vel, phi_face)
             l1_R, l2_R, fR0, fR1 = state_flux_eigs(Sw_R, nD_R, vel, phi_face)
 
             ap = max(0.0, l1_L, l2_L, l1_R, l2_R)
             am = min(0.0, l1_L, l2_L, l1_R, l2_R)
+
             den = ap - am + eps
             diff = ap * am
 
-            H[0, i, j] = (ap * fL0 - am * fR0 + diff * (S_R[0, i, j] - S_L[0, i, j])) / den
-            H[1, i, j] = (ap * fL1 - am * fR1 + diff * (S_R[1, i, j] - S_L[1, i, j])) / den
+            H[0, i, j] = (ap * fL0 - am * fR0 + diff * (Sw_R - Sw_L)) / den
+            H[1, i, j] = (ap * fL1 - am * fR1 + diff * (S1_R - S1_L)) / den
 
     return H
+
+
+def left_face_flux(S, ux, phi):
+    S_L, S_R = reconstruct(S, axis=1)
+    i = 0
+    q = np.zeros(ny)
+
+    for j in range(ny):
+        Sw_L = (S_L[0, i, j])
+        Sw_R = (S_R[0, i, j])
+        S1_L = (S_L[1, i, j])
+        S1_R = (S_R[1, i, j])
+
+        Sg_L = 1.0 - Sw_L
+        Sg_R = 1.0 - Sw_R
+
+        nD_L = S1_L / (Sg_L) if Sg_L > 1.0e-12 else 0.0
+        nD_R = S1_R / (Sg_R) if Sg_R > 1.0e-12 else 0.0
+
+        vel = (ux[i + 1, j])
+        phi_face = 0.5 * ((phi[i, j]) + (phi[i + 1, j]))
+
+        l1_L, l2_L, fL0, fL1 = state_flux_eigs(Sw_L, nD_L, vel, phi_face)
+        l1_R, l2_R, fR0, fR1 = state_flux_eigs(Sw_R, nD_R, vel, phi_face)
+
+        ap = max(0.0, l1_L, l2_L, l1_R, l2_R)
+        am = min(0.0, l1_L, l2_L, l1_R, l2_R)
+
+        den = ap - am + eps
+        diff = ap * am
+
+        q[j] = (ap * fL0 - am * fR0 + diff * (Sw_R - Sw_L)) / den
+
+    return q
+
 
 def foam_source(S, phi):
     Sw = S[0]
@@ -235,11 +307,10 @@ def compute_rhs(S, ux, uy, phi):
     rhs = np.zeros_like(S)
     nD = extract_nD(S)
 
-    f_in = flux(Sw_inj, nd_inj, ux[0, :])
     f_out = flux(S[0, -1, :], nD[-1, :], ux[-1, :])
 
-    rhs[:, 0, :] -= (Hx[:, 0, :] - f_in) / dx
     rhs[:, 1:-1, :] -= (Hx[:, 1:, :] - Hx[:, :-1, :]) / dx
+
     rhs[:, -1, :] -= (f_out - Hx[:, -1, :]) / dx
 
     if ny > 1 and np.max(np.abs(uy)) > 0.0:
@@ -250,8 +321,10 @@ def compute_rhs(S, ux, uy, phi):
         rhs[:, :, 1:-1] -= (Hy[:, :, 1:] - Hy[:, :, :-1]) / dy
         rhs[:, :, -1] -= (f_top - Hy[:, :, -1]) / dy
 
-    return (rhs + foam_source(S, phi)) / (phi[np.newaxis, :, :] + eps)
+    rhs += foam_source(S, phi)
+    rhs[:, 0, :] = 0.0
 
+    return rhs / (phi[np.newaxis, :, :])
 
 def apply_bc(S):
     S[0, 0, :] = Sw_inj
@@ -277,8 +350,8 @@ def compute_dt(S, ux, uy, phi):
     uy_cell = np.maximum(np.abs(uy[:, :-1]), np.abs(uy[:, 1:]))
 
     h = 1.0e-6
-    dfw_x = (fw(Sw + h, nD, ux_cell) - fw(Sw - h, nD, ux_cell)) / (2.0 * h + eps)
-    dfw_y = (fw(Sw + h, nD, uy_cell) - fw(Sw - h, nD, uy_cell)) / (2.0 * h + eps)
+    dfw_x = (fw(Sw + h, nD, ux_cell) - fw(Sw - h, nD, ux_cell)) / (2.0 * h)
+    dfw_y = (fw(Sw + h, nD, uy_cell) - fw(Sw - h, nD, uy_cell)) / (2.0 * h)
 
     ax = np.maximum(
         ux_cell * np.abs(dfw_x) / phi,
@@ -291,34 +364,59 @@ def compute_dt(S, ux, uy, phi):
 
     amax_x = np.max(ax)
     amax_y = np.max(ay)
-    dt = cfl / (amax_x / dx + amax_y / dy + eps)
+    dt = cfl / (amax_x / dx + amax_y / dy)
     return min(dt, dt_max) if dt_max is not None else dt
 
+
 def initial_condition():
-    S = np.zeros((2, nx, ny), dtype=np.float64)
+    S = np.zeros((2, nx, ny))
     S[0] = Sw0
     S[1] = Sg(Sw0) * nd_0
     return apply_bc(S)
 
 
+def water_mass_active_domain(S, phi):
+    return np.sum(phi[1:, :] * S[0, 1:, :]) * dx * dy
+
+
+def water_boundary(S, ux, uy, phi):
+    f_left = left_face_flux(S, ux, phi)
+    nD = extract_nD(S)
+
+    f_right = flux(S[0, -1, :], nD[-1, :], ux[-1, :])[0]
+
+    q_in = np.sum(f_left) * dy
+    q_out = np.sum(f_right) * dy
+
+    return q_in, q_out
+
 def advance_transport(S, ux, uy, phi, pressure, t_start, t_stop):
     t = t_start
     step = 0
+    water_in = 0.0
+    water_out = 0.0
 
     while t < t_stop:
         target = t_stop
-
         dt = min(compute_dt(S, ux, uy, phi), target - t)
+
+        q_in, q_out = water_boundary(S, ux, uy, phi)
+        water_in += q_in * dt
+        water_out += q_out * dt
+
         S = ssprk3(S, dt, ux, uy, phi)
         t += dt
         step += 1
 
-        if t >= t_stop:
-            print(f"Transport step {step}: t={t:.2f}/{t_stop:.2f}, dt={dt:.3e}, Sw=[{S[0].min():.4f}, {S[0].max():.4f}]")
+        print(
+            f"Transport step {step}: t={t:.2f}/{t_stop:.2f}, "
+            f"dt={dt:.3e}, Sw=[{S[0].min():.4f}, {S[0].max():.4f}]"
+        )
 
-        save_snapshot_txt(S, ux, uy, pressure, t)
+        if step % 50 == 0 or t >= t_stop:
+            save_snapshot_txt(S, ux, uy, pressure, t)
 
-    return S, t
+    return S, t, water_in, water_out
 
 
 def save_snapshot_file(S, ux, uy, pressure, t, tag="snapshot"):
@@ -328,15 +426,15 @@ def save_snapshot_file(S, ux, uy, pressure, t, tag="snapshot"):
 
 
 def save_snapshot_txt(S, ux, uy, pressure, t):
-    global snapshot_interval
+    global next_snapshot_interval
 
     if snapshot_file.exists():
         save_snapshot_file(S, ux, uy, pressure, t, tag="manual")
         snapshot_file.unlink(missing_ok=True)
 
-    if snapshot_interval is not None and t >= snapshot_interval - eps:
-        save_snapshot_file(S, ux, uy, pressure, snapshot_interval, tag="auto")
-        snapshot_interval += snapshot_interval
+    if snapshot_interval is not None and t >= next_snapshot_interval:
+        save_snapshot_file(S, ux, uy, pressure, next_snapshot_interval, tag="auto")
+        next_snapshot_interval += snapshot_interval
 
 
 def save_results(S, ux, uy, pressure):
@@ -361,10 +459,10 @@ def save_vti(S, ux, uy, pressure, path):
   <ImageData WholeExtent="0 {nx - 1} 0 {ny - 1} 0 0" Origin="{0.5 * dx} {0.5 * dy} 0" Spacing="{dx} {dy} 1">
     <Piece Extent="0 {nx - 1} 0 {ny - 1} 0 0">
       <PointData Scalars="Sw" Vectors="velocity">
-        <DataArray type="Float64" Name="Sw" format="ascii">{array_text(Sw)}</DataArray>
-        <DataArray type="Float64" Name="nD" format="ascii">{array_text(nD)}</DataArray>
-        <DataArray type="Float64" Name="pressure" format="ascii">{array_text(pressure)}</DataArray>
-        <DataArray type="Float64" Name="velocity" NumberOfComponents="3" format="ascii">{velocity_text}</DataArray>
+        <DataArray type="64" Name="Sw" format="ascii">{array_text(Sw)}</DataArray>
+        <DataArray type="64" Name="nD" format="ascii">{array_text(nD)}</DataArray>
+        <DataArray type="64" Name="pressure" format="ascii">{array_text(pressure)}</DataArray>
+        <DataArray type="64" Name="velocity" NumberOfComponents="3" format="ascii">{velocity_text}</DataArray>
       </PointData>
     </Piece>
   </ImageData>
@@ -375,16 +473,32 @@ def save_vti(S, ux, uy, pressure, path):
 def run_simulation():
     phi = np.full((nx, ny), phi_value)
     darcy_data = create_darcy_data()
+
     S = initial_condition()
     t = 0.0
     ux = uy = pressure = None
 
     while t < t_final:
         _, ux, uy, pressure = solve_darcy(S[0], extract_nD(S), darcy_data)
-        S, t = advance_transport(S, ux, uy, phi, pressure, t, min(t + dt_u, t_final))
-        print(f"Macro step: t={t:.2f}/{t_final:.2f}")
+
+        mass_before = water_mass_active_domain(S, phi)
+
+        S, t, water_in, water_out = advance_transport(
+            S, ux, uy, phi, pressure, t, min(t + dt_u, t_final)
+        )
+
+        mass_after = water_mass_active_domain(S, phi)
+        delta_mass = mass_after - mass_before
+
+        print(
+            f"Macro step: t={t:.2f}/{t_final:.2f} | "
+            f"agua entrou={water_in:.6e}, "
+            f"agua saiu={water_out:.6e}, "
+            f"delta massa={delta_mass:.6e}, "
+        )
 
     save_results(S, ux, uy, pressure)
 
 
-run_simulation()
+if __name__ == "__main__":
+    run_simulation()
