@@ -85,7 +85,7 @@ def foam_viscosity(Sw, nD, u=u_inj):
     u_abs, sg, nf = abs(u), max(1.0 - Sw, 0.0), max(nD, 0.0) * nmax
     krg_val, lw = krg_s(Sw), lambda_w_s(Sw)
     
-    if (nf > 0) and (sg > eps):
+    if (nf > 0) and (sg > eps) and (u_abs > eps) and (krg_val > eps):
         a = alpha_foam * nf * lw * (phi_value * sg / (krg_val * u_abs))**foam_exponent / 3.0
         b = (krg_val + lw * mug) / 2.0
         sq = np.sqrt(2.0 * a**3 * b + b**2)
@@ -277,11 +277,12 @@ def left_face_flux(S, ux, phi):
         nD_L = S1_L / (Sg_L) if Sg_L > 1.0e-12 else 0.0
         nD_R = S1_R / (Sg_R) if Sg_R > 1.0e-12 else 0.0
 
-        vel = (ux[i + 1, j])
+        vel_L = (ux[i, j])
+        vel_R = (ux[i + 1, j])
         phi_face = 0.5 * ((phi[i, j]) + (phi[i + 1, j]))
 
-        l1_L, l2_L, fL0, fL1 = state_flux_eigs(Sw_L, nD_L, vel, phi_face)
-        l1_R, l2_R, fR0, fR1 = state_flux_eigs(Sw_R, nD_R, vel, phi_face)
+        l1_L, l2_L, fL0, fL1 = state_flux_eigs(Sw_L, nD_L, vel_L, phi_face)
+        l1_R, l2_R, fR0, fR1 = state_flux_eigs(Sw_R, nD_R, vel_R, phi_face)
 
         ap = max(0.0, l1_L, l2_L, l1_R, l2_R)
         am = min(0.0, l1_L, l2_L, l1_R, l2_R)
@@ -495,6 +496,7 @@ def run_simulation():
             f"agua entrou={water_in:.6e}, "
             f"agua saiu={water_out:.6e}, "
             f"delta massa={delta_mass:.6e}, "
+            f"balanço={delta_mass-water_in+water_out:.6e}, "
         )
 
     save_results(S, ux, uy, pressure)

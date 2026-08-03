@@ -139,8 +139,8 @@ K = fem.Function(V_K)
 K.name = "Permeabilidade"
 
 dof_coords = V_K.tabulate_dof_coordinates()
-idx_i = np.clip(np.floor(dof_coords[:, 0] / (3.67/220)).astype(int), 0, 219)
-idx_j = np.clip(np.floor(dof_coords[:, 1] / (1.0/60)).astype(int), 0, 59)
+idx_i = (dof_coords[:, 0] / (3.67/220)).astype(int)
+idx_j = (dof_coords[:, 1] / (1.0/60)).astype(int)
 K.x.array[:] = permeability[idx_i, idx_j].flatten()
 
 u = ufl.TrialFunction(V)
@@ -179,9 +179,10 @@ u_vel.interpolate(flux_expr)
 # or [VisIt](https://visit-dav.github.io/visit-website/):
 
 out_folder = Path(__file__).parent.absolute() / "out_poisson"
-out_folder.mkdir(parents=True, exist_ok=True)
+out_folder.mkdir(parents=True, exist_ok=True) 
 
-output_file = out_folder / "resultados.bp"
-
-with io.VTXWriter(msh.comm, output_file, [uh, K, u_vel]) as vtx:
-    vtx.write(0.0) 
+with io.XDMFFile(msh.comm, out_folder / "poisson.xdmf", "w") as file:
+    file.write_mesh(msh)
+    file.write_function(uh)  
+    file.write_function(K)     
+    file.write_function(u_vel) 
